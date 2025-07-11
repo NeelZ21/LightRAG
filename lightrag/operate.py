@@ -244,7 +244,9 @@ async def _handle_single_relationship_extraction(
 
     first_after_dot = file_path.split('.', 1)[0] if '.' in file_path else ''
 
-    logger.info(f"Changed src_id & tgt_id: {first_after_dot + " " + source }, tgt_id: {first_after_dot+ " " + target}")
+    logger.info(
+    f"Changed src_id & tgt_id: {first_after_dot + ' ' + source}, "
+    f"tgt_id: {first_after_dot + ' ' + target}")
     # ...existing code...
 
     result1234 = dict(
