@@ -201,14 +201,46 @@ async def _handle_single_entity_extraction(
             f"Entity extraction error: empty description for entity '{entity_name}' of type '{entity_type}'"
         )
         return None
+    
+          #----->## Added the Log BY Nisarg
+    logger.debug("First Time Entity is handeled by _handle_single_entity_extraction")
+    logger.info(f"First original enitit: {entity_name}")
 
-    return dict(
-        entity_name=entity_name,
+        ## Added to Take # into Account 
+
+    def extract_entity_prefix_latest(file_path: str) -> str:
+    # 1) strip off any “#…” suffix (e.g. “#chunk_17”)
+        base = file_path.split("#", 1)[0]
+        # 2) strip off any file‑extension (anything after the last dot)
+        if "." in base:
+            base = base.rsplit(".", 1)[0]
+        # 3) replace hyphens, underscores, etc. with a single space
+        #    — you can add other delimiters into the character class as needed
+        return re.sub(r"[-_]+", " ", base).strip()
+
+    first_after_dot = extract_entity_prefix_latest(file_path)
+    logger.info(f"First changed entity name: {first_after_dot+entity_name}")
+
+    # ...existing code...
+
+    result123 = dict(
+        entity_name=first_after_dot + " " + entity_name,
         entity_type=entity_type,
         description=entity_description,
         source_id=chunk_key,
         file_path=file_path,
     )
+    logger.info(f"Entity extraction result: passed for further training {result123}")
+
+# ...existing code...
+    return dict(
+        entity_name=first_after_dot + " " + entity_name ,
+        entity_type=entity_type,
+        description=entity_description,
+        source_id=chunk_key,
+        file_path=file_path,
+    )
+
 
 
 async def _handle_single_relationship_extraction(
@@ -259,15 +291,51 @@ async def _handle_single_relationship_extraction(
         if is_float_regex(record_attributes[-1].strip('"').strip("'"))
         else 1.0
     )
+    ## Log added by Nisarg
+    logger.info(f"First Time Entity is handeled by # _handle_single_relationship_extraction")
+
+    logger.info(f"First original src_id & tgt_id: {source}, tgt_id: {target}")
+
+    def extract_entity_prefix_latest(file_path: str) -> str:
+    # 1) strip off any “#…” suffix (e.g. “#chunk_17”)
+        base = file_path.split("#", 1)[0]
+        # 2) strip off any file‑extension (anything after the last dot)
+        if "." in base:
+            base = base.rsplit(".", 1)[0]
+        # 3) replace hyphens, underscores, etc. with a single space
+        #    — you can add other delimiters into the character class as needed
+        return re.sub(r"[-_]+", " ", base).strip()
+    
+
+    first_after_dot = extract_entity_prefix_latest(file_path)
+
+    logger.info(
+    f"Changed src_id & tgt_id: {first_after_dot + source}"
+    f"tgt_id: {first_after_dot + target}")
+    # ...existing code...
+
+    result1234 = dict(
+        src_name=first_after_dot + " " + source,
+        tgt_name=first_after_dot + " " + target,
+        weight=weight,
+        description=edge_description,
+        keywords=edge_keywords,
+        source_id=edge_source_id,
+        file_path=file_path,
+    ),
+    
+    logger.info(f"Relationship extraction result: passed for further training {result1234}")
+
     return dict(
-        src_id=source,
-        tgt_id=target,
+        src_id=first_after_dot + " " + source,
+        tgt_id=first_after_dot + " " + target,
         weight=weight,
         description=edge_description,
         keywords=edge_keywords,
         source_id=edge_source_id,
         file_path=file_path,
     )
+
 
 
 async def _rebuild_knowledge_from_chunks(
