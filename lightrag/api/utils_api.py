@@ -268,6 +268,8 @@ def display_splash_screen(args: argparse.Namespace) -> None:
     ASCIIColors.yellow(f"{args.summary_language}")
     ASCIIColors.white("    ├─ Max Parallel Insert: ", end="")
     ASCIIColors.yellow(f"{args.max_parallel_insert}")
+    ASCIIColors.white("    ├─ Max Embed Tokens: ", end="")
+    ASCIIColors.yellow(f"{args.max_embed_tokens}")
     ASCIIColors.white("    ├─ Chunk Size: ", end="")
     ASCIIColors.yellow(f"{args.chunk_size}")
     ASCIIColors.white("    ├─ Chunk Overlap Size: ", end="")
@@ -276,6 +278,7 @@ def display_splash_screen(args: argparse.Namespace) -> None:
     ASCIIColors.yellow(f"{args.cosine_threshold}")
     ASCIIColors.white("    ├─ Top-K: ", end="")
     ASCIIColors.yellow(f"{args.top_k}")
+    ASCIIColors.white("    ├─ Max Token Summary: ", end="")
     ASCIIColors.white("    └─ Force LLM Summary on Merge: ", end="")
     ASCIIColors.yellow(
         f"{get_env_value('FORCE_LLM_SUMMARY_ON_MERGE', DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE, int)}"

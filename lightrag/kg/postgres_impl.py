@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Any, Union, final
 import numpy as np
 import configparser
-import ssl
 
 from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 
@@ -59,147 +58,29 @@ class PostgreSQLDB:
         self.increment = 1
         self.pool: Pool | None = None
 
-        # SSL configuration
-        self.ssl_mode = config.get("ssl_mode")
-        self.ssl_cert = config.get("ssl_cert")
-        self.ssl_key = config.get("ssl_key")
-        self.ssl_root_cert = config.get("ssl_root_cert")
-        self.ssl_crl = config.get("ssl_crl")
-
         if self.user is None or self.password is None or self.database is None:
             raise ValueError("Missing database user, password, or database")
 
-    def _create_ssl_context(self) -> ssl.SSLContext | None:
-        """Create SSL context based on configuration parameters."""
-        if not self.ssl_mode:
-            return None
-
-        ssl_mode = self.ssl_mode.lower()
-
-        # For simple modes that don't require custom context
-        if ssl_mode in ["disable", "allow", "prefer", "require"]:
-            if ssl_mode == "disable":
-                return None
-            elif ssl_mode in ["require", "prefer", "allow"]:
-                # Return None for simple SSL requirement, handled in initdb
-                return None
-
-        # For modes that require certificate verification
-        if ssl_mode in ["verify-ca", "verify-full"]:
-            try:
-                context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-
-                # Configure certificate verification
-                if ssl_mode == "verify-ca":
-                    context.check_hostname = False
-                elif ssl_mode == "verify-full":
-                    context.check_hostname = True
-
-                # Load root certificate if provided
-                if self.ssl_root_cert:
-                    if os.path.exists(self.ssl_root_cert):
-                        context.load_verify_locations(cafile=self.ssl_root_cert)
-                        logger.info(
-                            f"PostgreSQL, Loaded SSL root certificate: {self.ssl_root_cert}"
-                        )
-                    else:
-                        logger.warning(
-                            f"PostgreSQL, SSL root certificate file not found: {self.ssl_root_cert}"
-                        )
-
-                # Load client certificate and key if provided
-                if self.ssl_cert and self.ssl_key:
-                    if os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key):
-                        context.load_cert_chain(self.ssl_cert, self.ssl_key)
-                        logger.info(
-                            f"PostgreSQL, Loaded SSL client certificate: {self.ssl_cert}"
-                        )
-                    else:
-                        logger.warning(
-                            "PostgreSQL, SSL client certificate or key file not found"
-                        )
-
-                # Load certificate revocation list if provided
-                if self.ssl_crl:
-                    if os.path.exists(self.ssl_crl):
-                        context.load_verify_locations(crlfile=self.ssl_crl)
-                        logger.info(f"PostgreSQL, Loaded SSL CRL: {self.ssl_crl}")
-                    else:
-                        logger.warning(
-                            f"PostgreSQL, SSL CRL file not found: {self.ssl_crl}"
-                        )
-
-                return context
-
-            except Exception as e:
-                logger.error(f"PostgreSQL, Failed to create SSL context: {e}")
-                raise ValueError(f"SSL configuration error: {e}")
-
-        # Unknown SSL mode
-        logger.warning(f"PostgreSQL, Unknown SSL mode: {ssl_mode}, SSL disabled")
-        return None
-
     async def initdb(self):
         try:
-            # Prepare connection parameters
-            connection_params = {
-                "user": self.user,
-                "password": self.password,
-                "database": self.database,
-                "host": self.host,
-                "port": self.port,
-                "min_size": 1,
-                "max_size": self.max,
-            }
+            self.pool = await asyncpg.create_pool(  # type: ignore
+                user=self.user,
+                password=self.password,
+                database=self.database,
+                host=self.host,
+                port=self.port,
+                min_size=1,
+                max_size=self.max,
+            )
 
-            # Add SSL configuration if provided
-            ssl_context = self._create_ssl_context()
-            if ssl_context is not None:
-                connection_params["ssl"] = ssl_context
-                logger.info("PostgreSQL, SSL configuration applied")
-            elif self.ssl_mode:
-                # Handle simple SSL modes without custom context
-                if self.ssl_mode.lower() in ["require", "prefer"]:
-                    connection_params["ssl"] = True
-                elif self.ssl_mode.lower() == "disable":
-                    connection_params["ssl"] = False
-                logger.info(f"PostgreSQL, SSL mode set to: {self.ssl_mode}")
-
-            self.pool = await asyncpg.create_pool(**connection_params)  # type: ignore
-
-            # Ensure VECTOR extension is available
-            async with self.pool.acquire() as connection:
-                await self.configure_vector_extension(connection)
-
-            ssl_status = "with SSL" if connection_params.get("ssl") else "without SSL"
             logger.info(
-                f"PostgreSQL, Connected to database at {self.host}:{self.port}/{self.database} {ssl_status}"
+                f"PostgreSQL, Connected to database at {self.host}:{self.port}/{self.database}"
             )
         except Exception as e:
             logger.error(
                 f"PostgreSQL, Failed to connect database at {self.host}:{self.port}/{self.database}, Got:{e}"
             )
             raise
-
-    @staticmethod
-    async def configure_vector_extension(connection: asyncpg.Connection) -> None:
-        """Create VECTOR extension if it doesn't exist for vector similarity operations."""
-        try:
-            await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")  # type: ignore
-            logger.info("VECTOR extension ensured for PostgreSQL")
-        except Exception as e:
-            logger.warning(f"Could not create VECTOR extension: {e}")
-            # Don't raise - let the system continue without vector extension
-
-    @staticmethod
-    async def configure_age_extension(connection: asyncpg.Connection) -> None:
-        """Create AGE extension if it doesn't exist for graph operations."""
-        try:
-            await connection.execute("CREATE EXTENSION IF NOT EXISTS age")  # type: ignore
-            logger.info("AGE extension ensured for PostgreSQL")
-        except Exception as e:
-            logger.warning(f"Could not create AGE extension: {e}")
-            # Don't raise - let the system continue without AGE extension
 
     @staticmethod
     async def configure_age(connection: asyncpg.Connection, graph_name: str) -> None:
@@ -224,32 +105,25 @@ class PostgreSQLDB:
         ):
             pass
 
-    async def _migrate_llm_cache_add_columns(self):
-        """Add chunk_id and cache_type columns to LIGHTRAG_LLM_CACHE table if they don't exist"""
+    async def _migrate_llm_cache_add_chunk_id(self):
+        """Add chunk_id column to LIGHTRAG_LLM_CACHE table if it doesn't exist"""
         try:
-            # Check if both columns exist
-            check_columns_sql = """
+            # Check if chunk_id column exists
+            check_column_sql = """
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = 'lightrag_llm_cache'
-            AND column_name IN ('chunk_id', 'cache_type')
+            AND column_name = 'chunk_id'
             """
 
-            existing_columns = await self.query(check_columns_sql, multirows=True)
-            existing_column_names = (
-                {col["column_name"] for col in existing_columns}
-                if existing_columns
-                else set()
-            )
-
-            # Add missing chunk_id column
-            if "chunk_id" not in existing_column_names:
+            column_info = await self.query(check_column_sql)
+            if not column_info:
                 logger.info("Adding chunk_id column to LIGHTRAG_LLM_CACHE table")
-                add_chunk_id_sql = """
+                add_column_sql = """
                 ALTER TABLE LIGHTRAG_LLM_CACHE
                 ADD COLUMN chunk_id VARCHAR(255) NULL
                 """
-                await self.execute(add_chunk_id_sql)
+                await self.execute(add_column_sql)
                 logger.info(
                     "Successfully added chunk_id column to LIGHTRAG_LLM_CACHE table"
                 )
@@ -257,49 +131,62 @@ class PostgreSQLDB:
                 logger.info(
                     "chunk_id column already exists in LIGHTRAG_LLM_CACHE table"
                 )
+        except Exception as e:
+            logger.warning(f"Failed to add chunk_id column to LIGHTRAG_LLM_CACHE: {e}")
 
-            # Add missing cache_type column
-            if "cache_type" not in existing_column_names:
+    async def _migrate_llm_cache_add_cache_type(self):
+        """Add cache_type column to LIGHTRAG_LLM_CACHE table if it doesn't exist"""
+        try:
+            # Check if cache_type column exists
+            check_column_sql = """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'lightrag_llm_cache'
+            AND column_name = 'cache_type'
+            """
+
+            column_info = await self.query(check_column_sql)
+            if not column_info:
                 logger.info("Adding cache_type column to LIGHTRAG_LLM_CACHE table")
-                add_cache_type_sql = """
+                add_column_sql = """
                 ALTER TABLE LIGHTRAG_LLM_CACHE
                 ADD COLUMN cache_type VARCHAR(32) NULL
                 """
-                await self.execute(add_cache_type_sql)
+                await self.execute(add_column_sql)
                 logger.info(
                     "Successfully added cache_type column to LIGHTRAG_LLM_CACHE table"
                 )
 
-                # Migrate existing data using optimized regex pattern
+                # Migrate existing data: extract cache_type from flattened keys
                 logger.info(
-                    "Migrating existing LLM cache data to populate cache_type field (optimized)"
+                    "Migrating existing LLM cache data to populate cache_type field"
                 )
-                optimized_update_sql = """
+                update_sql = """
                 UPDATE LIGHTRAG_LLM_CACHE
                 SET cache_type = CASE
-                    WHEN id ~ '^[^:]+:[^:]+:' THEN split_part(id, ':', 2)
+                    WHEN id LIKE '%:%:%' THEN split_part(id, ':', 2)
                     ELSE 'extract'
                 END
                 WHERE cache_type IS NULL
                 """
-                await self.execute(optimized_update_sql)
+                await self.execute(update_sql)
                 logger.info("Successfully migrated existing LLM cache data")
             else:
                 logger.info(
                     "cache_type column already exists in LIGHTRAG_LLM_CACHE table"
                 )
-
         except Exception as e:
-            logger.warning(f"Failed to add columns to LIGHTRAG_LLM_CACHE: {e}")
+            logger.warning(
+                f"Failed to add cache_type column to LIGHTRAG_LLM_CACHE: {e}"
+            )
 
     async def _migrate_timestamp_columns(self):
-        """Migrate timestamp columns in tables to witimezone-free types, assuming original data is in UTC time"""
+        """Migrate timestamp columns in tables to timezone-aware types, assuming original data is in UTC time"""
         # Tables and columns that need migration
         tables_to_migrate = {
             "LIGHTRAG_VDB_ENTITY": ["create_time", "update_time"],
             "LIGHTRAG_VDB_RELATION": ["create_time", "update_time"],
             "LIGHTRAG_DOC_CHUNKS": ["create_time", "update_time"],
-            "LIGHTRAG_DOC_STATUS": ["created_at", "updated_at"],
         }
 
         for table_name, columns in tables_to_migrate.items():
@@ -324,7 +211,7 @@ class PostgreSQLDB:
                     data_type = column_info.get("data_type")
                     if data_type == "timestamp without time zone":
                         logger.debug(
-                            f"Column {table_name}.{column_name} is already witimezone-free, no migration needed"
+                            f"Column {table_name}.{column_name} is already timezone-aware, no migration needed"
                         )
                         continue
 
@@ -340,7 +227,7 @@ class PostgreSQLDB:
 
                     await self.execute(migration_sql)
                     logger.info(
-                        f"Successfully migrated {table_name}.{column_name} to timezone-free type"
+                        f"Successfully migrated {table_name}.{column_name} to timezone-aware type"
                     )
                 except Exception as e:
                     # Log error but don't interrupt the process
@@ -405,105 +292,121 @@ class PostgreSQLDB:
             # Do not re-raise, to allow the application to start
 
     async def _check_llm_cache_needs_migration(self):
-        """Check if LLM cache data needs migration by examining any record with old format"""
+        """Check if LLM cache data needs migration by examining the first record"""
         try:
-            # Optimized query: directly check for old format records without sorting
+            # Only query the first record to determine format
             check_sql = """
-            SELECT 1 FROM LIGHTRAG_LLM_CACHE
-            WHERE id NOT LIKE '%:%'
+            SELECT id FROM LIGHTRAG_LLM_CACHE
+            ORDER BY create_time ASC
             LIMIT 1
             """
             result = await self.query(check_sql)
 
-            # If any old format record exists, migration is needed
-            return result is not None
+            if result and result.get("id"):
+                # If id doesn't contain colon, it's old format
+                return ":" not in result["id"]
 
+            return False  # No data or already new format
         except Exception as e:
             logger.warning(f"Failed to check LLM cache migration status: {e}")
             return False
 
     async def _migrate_llm_cache_to_flattened_keys(self):
-        """Optimized version: directly execute single UPDATE migration to migrate old format cache keys to flattened format"""
+        """Migrate LLM cache to flattened key format, recalculating hash values"""
         try:
-            # Check if migration is needed
-            check_sql = """
-            SELECT COUNT(*) as count FROM LIGHTRAG_LLM_CACHE
+            # Get all old format data
+            old_data_sql = """
+            SELECT id, mode, original_prompt, return_value, chunk_id,
+                workspace, create_time, update_time
+            FROM LIGHTRAG_LLM_CACHE
             WHERE id NOT LIKE '%:%'
             """
-            result = await self.query(check_sql)
 
-            if not result or result["count"] == 0:
+            old_records = await self.query(old_data_sql, multirows=True)
+
+            if not old_records:
                 logger.info("No old format LLM cache data found, skipping migration")
                 return
 
-            old_count = result["count"]
-            logger.info(f"Found {old_count} old format cache records")
-
-            # Check potential primary key conflicts (optional but recommended)
-            conflict_check_sql = """
-            WITH new_ids AS (
-                SELECT
-                    workspace,
-                    mode,
-                    id as old_id,
-                    mode || ':' ||
-                    CASE WHEN mode = 'default' THEN 'extract' ELSE 'unknown' END || ':' ||
-                    md5(original_prompt) as new_id
-                FROM LIGHTRAG_LLM_CACHE
-                WHERE id NOT LIKE '%:%'
+            logger.info(
+                f"Found {len(old_records)} old format cache records, starting migration..."
             )
-            SELECT COUNT(*) as conflicts
-            FROM new_ids n1
-            JOIN LIGHTRAG_LLM_CACHE existing
-            ON existing.workspace = n1.workspace
-            AND existing.mode = n1.mode
-            AND existing.id = n1.new_id
-            WHERE existing.id LIKE '%:%'  -- Only check conflicts with existing new format records
-            """
 
-            conflict_result = await self.query(conflict_check_sql)
-            if conflict_result and conflict_result["conflicts"] > 0:
-                logger.warning(
-                    f"Found {conflict_result['conflicts']} potential ID conflicts with existing records"
-                )
-                # Can choose to continue or abort, here we choose to continue and log warning
+            # Import hash calculation function
+            from ..utils import compute_args_hash
 
-            # Execute single UPDATE migration
-            logger.info("Starting optimized LLM cache migration...")
-            migration_sql = """
-            UPDATE LIGHTRAG_LLM_CACHE
-            SET
-                id = mode || ':' ||
-                     CASE WHEN mode = 'default' THEN 'extract' ELSE 'unknown' END || ':' ||
-                     md5(original_prompt),
-                cache_type = CASE WHEN mode = 'default' THEN 'extract' ELSE 'unknown' END,
-                update_time = CURRENT_TIMESTAMP
-            WHERE id NOT LIKE '%:%'
-            """
+            migrated_count = 0
 
-            # Execute migration
-            await self.execute(migration_sql)
+            # Migrate data in batches
+            for record in old_records:
+                try:
+                    # Recalculate hash using correct method
+                    new_hash = compute_args_hash(
+                        record["mode"], record["original_prompt"]
+                    )
 
-            # Verify migration results
-            verify_sql = """
-            SELECT COUNT(*) as remaining_old FROM LIGHTRAG_LLM_CACHE
-            WHERE id NOT LIKE '%:%'
-            """
-            verify_result = await self.query(verify_sql)
-            remaining = verify_result["remaining_old"] if verify_result else -1
+                    # Determine cache_type based on mode
+                    cache_type = "extract" if record["mode"] == "default" else "unknown"
 
-            if remaining == 0:
-                logger.info(
-                    f"✅ Successfully migrated {old_count} LLM cache records to flattened format"
-                )
-            else:
-                logger.warning(
-                    f"⚠️ Migration completed but {remaining} old format records remain"
-                )
+                    # Generate new flattened key
+                    new_key = f"{record['mode']}:{cache_type}:{new_hash}"
+
+                    # Insert new format data with cache_type field
+                    insert_sql = """
+                    INSERT INTO LIGHTRAG_LLM_CACHE
+                    (workspace, id, mode, original_prompt, return_value, chunk_id, cache_type, create_time, update_time)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (workspace, mode, id) DO NOTHING
+                    """
+
+                    await self.execute(
+                        insert_sql,
+                        {
+                            "workspace": record[
+                                "workspace"
+                            ],  # Use original record's workspace
+                            "id": new_key,
+                            "mode": record["mode"],
+                            "original_prompt": record["original_prompt"],
+                            "return_value": record["return_value"],
+                            "chunk_id": record["chunk_id"],
+                            "cache_type": cache_type,  # Add cache_type field
+                            "create_time": record["create_time"],
+                            "update_time": record["update_time"],
+                        },
+                    )
+
+                    # Delete old data
+                    delete_sql = """
+                    DELETE FROM LIGHTRAG_LLM_CACHE
+                    WHERE workspace=$1 AND mode=$2 AND id=$3
+                    """
+                    await self.execute(
+                        delete_sql,
+                        {
+                            "workspace": record[
+                                "workspace"
+                            ],  # Use original record's workspace
+                            "mode": record["mode"],
+                            "id": record["id"],  # Old id
+                        },
+                    )
+
+                    migrated_count += 1
+
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to migrate cache record {record['id']}: {e}"
+                    )
+                    continue
+
+            logger.info(
+                f"Successfully migrated {migrated_count} cache records to flattened format"
+            )
 
         except Exception as e:
-            logger.error(f"Optimized LLM cache migration failed: {e}")
-            raise
+            logger.error(f"LLM cache migration failed: {e}")
+            # Don't raise exception, allow system to continue startup
 
     async def _migrate_doc_status_add_chunks_list(self):
         """Add chunks_list column to LIGHTRAG_DOC_STATUS table if it doesn't exist"""
@@ -743,11 +646,20 @@ class PostgreSQLDB:
             logger.error(f"PostgreSQL, Failed to migrate timestamp columns: {e}")
             # Don't throw an exception, allow the initialization process to continue
 
-        # Migrate LLM cache table to add chunk_id and cache_type columns if needed
+        # Migrate LLM cache table to add chunk_id field if needed
         try:
-            await self._migrate_llm_cache_add_columns()
+            await self._migrate_llm_cache_add_chunk_id()
         except Exception as e:
-            logger.error(f"PostgreSQL, Failed to migrate LLM cache columns: {e}")
+            logger.error(f"PostgreSQL, Failed to migrate LLM cache chunk_id field: {e}")
+            # Don't throw an exception, allow the initialization process to continue
+
+        # Migrate LLM cache table to add cache_type field if needed
+        try:
+            await self._migrate_llm_cache_add_cache_type()
+        except Exception as e:
+            logger.error(
+                f"PostgreSQL, Failed to migrate LLM cache cache_type field: {e}"
+            )
             # Don't throw an exception, allow the initialization process to continue
 
         # Finally, attempt to migrate old doc chunks data if needed
@@ -903,27 +815,6 @@ class ClientManager:
             "max_connections": os.environ.get(
                 "POSTGRES_MAX_CONNECTIONS",
                 config.get("postgres", "max_connections", fallback=20),
-            ),
-            # SSL configuration
-            "ssl_mode": os.environ.get(
-                "POSTGRES_SSL_MODE",
-                config.get("postgres", "ssl_mode", fallback=None),
-            ),
-            "ssl_cert": os.environ.get(
-                "POSTGRES_SSL_CERT",
-                config.get("postgres", "ssl_cert", fallback=None),
-            ),
-            "ssl_key": os.environ.get(
-                "POSTGRES_SSL_KEY",
-                config.get("postgres", "ssl_key", fallback=None),
-            ),
-            "ssl_root_cert": os.environ.get(
-                "POSTGRES_SSL_ROOT_CERT",
-                config.get("postgres", "ssl_root_cert", fallback=None),
-            ),
-            "ssl_crl": os.environ.get(
-                "POSTGRES_SSL_CRL",
-                config.get("postgres", "ssl_crl", fallback=None),
             ),
         }
 
@@ -1603,10 +1494,9 @@ class PGDocStatusStorage(DocStatusStorage):
         """Convert datetime to ISO format string with timezone info"""
         if dt is None:
             return None
-        # If no timezone info, assume it's UTC time (as stored in database)
+        # If no timezone info, assume it's UTC time
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        # If datetime already has timezone info, keep it as is
         return dt.isoformat()
 
     async def initialize(self):
@@ -1928,8 +1818,8 @@ class PGGraphStorage(BaseGraphStorage):
         """
         Generate graph name based on workspace and namespace for data isolation.
         Rules:
-        - If workspace is empty or "default": graph_name = namespace
-        - If workspace has other value: graph_name = workspace_namespace
+        - If workspace is empty: graph_name = namespace
+        - If workspace has value: graph_name = workspace_namespace
 
         Args:
             None
@@ -1938,15 +1828,15 @@ class PGGraphStorage(BaseGraphStorage):
             str: The graph name for the current workspace
         """
         workspace = getattr(self, "workspace", None)
-        namespace = self.namespace
+        namespace = self.namespace or os.environ.get("AGE_GRAPH_NAME", "lightrag")
 
-        if workspace and workspace.strip() and workspace.strip().lower() != "default":
+        if workspace and workspace.strip():
             # Ensure names comply with PostgreSQL identifier specifications
             safe_workspace = re.sub(r"[^a-zA-Z0-9_]", "_", workspace.strip())
             safe_namespace = re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
             return f"{safe_workspace}_{safe_namespace}"
         else:
-            # When workspace is empty or "default", use namespace directly
+            # When workspace is empty, use namespace directly
             return re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
 
     @staticmethod
@@ -1990,11 +1880,6 @@ class PGGraphStorage(BaseGraphStorage):
         logger.info(
             f"PostgreSQL Graph initialized: workspace='{self.workspace}', graph_name='{self.graph_name}'"
         )
-
-        # Create AGE extension and configure graph environment once at initialization
-        async with self.db.pool.acquire() as connection:
-            # First ensure AGE extension is created
-            await PostgreSQLDB.configure_age_extension(connection)
 
         # Execute each statement separately and ignore errors
         queries = [
@@ -2050,101 +1935,53 @@ class PGGraphStorage(BaseGraphStorage):
                 the dictionary key is the field name and the value is the
                 value converted to a python type
         """
-
-        @staticmethod
-        def parse_agtype_string(agtype_str: str) -> tuple[str, str]:
-            """
-            Parse agtype string precisely, separating JSON content and type identifier
-
-            Args:
-                agtype_str: String like '{"json": "content"}::vertex'
-
-            Returns:
-                (json_content, type_identifier)
-            """
-            if not isinstance(agtype_str, str) or "::" not in agtype_str:
-                return agtype_str, ""
-
-            # Find the last :: from the right, which is the start of type identifier
-            last_double_colon = agtype_str.rfind("::")
-
-            if last_double_colon == -1:
-                return agtype_str, ""
-
-            # Separate JSON content and type identifier
-            json_content = agtype_str[:last_double_colon]
-            type_identifier = agtype_str[last_double_colon + 2 :]
-
-            return json_content, type_identifier
-
-        @staticmethod
-        def safe_json_parse(json_str: str, context: str = "") -> dict:
-            """
-            Safe JSON parsing with simplified error logging
-            """
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing failed ({context}): {e}")
-                logger.error(f"Raw data (first 100 chars): {repr(json_str[:100])}")
-                logger.error(f"Error position: line {e.lineno}, column {e.colno}")
-                return None
-
         # result holder
         d = {}
 
         # prebuild a mapping of vertex_id to vertex mappings to be used
         # later to build edges
         vertices = {}
+        for k in record.keys():
+            v = record[k]
+            # agtype comes back '{key: value}::type' which must be parsed
+            if isinstance(v, str) and "::" in v:
+                if v.startswith("[") and v.endswith("]"):
+                    if "::vertex" not in v:
+                        continue
+                    v = v.replace("::vertex", "")
+                    vertexes = json.loads(v)
+                    for vertex in vertexes:
+                        vertices[vertex["id"]] = vertex.get("properties")
+                else:
+                    dtype = v.split("::")[-1]
+                    v = v.split("::")[0]
+                    if dtype == "vertex":
+                        vertex = json.loads(v)
+                        vertices[vertex["id"]] = vertex.get("properties")
 
-        # First pass: preprocess vertices
+        # iterate returned fields and parse appropriately
         for k in record.keys():
             v = record[k]
             if isinstance(v, str) and "::" in v:
                 if v.startswith("[") and v.endswith("]"):
-                    # Handle vertex arrays
-                    json_content, type_id = parse_agtype_string(v)
-                    if type_id == "vertex":
-                        vertexes = safe_json_parse(
-                            json_content, f"vertices array for {k}"
-                        )
-                        if vertexes:
-                            for vertex in vertexes:
-                                vertices[vertex["id"]] = vertex.get("properties")
-                else:
-                    # Handle single vertex
-                    json_content, type_id = parse_agtype_string(v)
-                    if type_id == "vertex":
-                        vertex = safe_json_parse(json_content, f"single vertex for {k}")
-                        if vertex:
-                            vertices[vertex["id"]] = vertex.get("properties")
+                    if "::vertex" in v:
+                        v = v.replace("::vertex", "")
+                        d[k] = json.loads(v)
 
-        # Second pass: process all fields
-        for k in record.keys():
-            v = record[k]
-            if isinstance(v, str) and "::" in v:
-                if v.startswith("[") and v.endswith("]"):
-                    # Handle array types
-                    json_content, type_id = parse_agtype_string(v)
-                    if type_id in ["vertex", "edge"]:
-                        parsed_data = safe_json_parse(
-                            json_content, f"array {type_id} for field {k}"
-                        )
-                        d[k] = parsed_data if parsed_data is not None else None
+                    elif "::edge" in v:
+                        v = v.replace("::edge", "")
+                        d[k] = json.loads(v)
                     else:
-                        logger.warning(f"Unknown array type: {type_id}")
-                        d[k] = None
+                        print("WARNING: unsupported type")
+                        continue
+
                 else:
-                    # Handle single objects
-                    json_content, type_id = parse_agtype_string(v)
-                    if type_id in ["vertex", "edge"]:
-                        parsed_data = safe_json_parse(
-                            json_content, f"single {type_id} for field {k}"
-                        )
-                        d[k] = parsed_data if parsed_data is not None else None
-                    else:
-                        # May be other types of agtype data, keep as is
-                        d[k] = v
+                    dtype = v.split("::")[-1]
+                    v = v.split("::")[0]
+                    if dtype == "vertex":
+                        d[k] = json.loads(v)
+                    elif dtype == "edge":
+                        d[k] = json.loads(v)
             else:
                 d[k] = v  # Keep as string
 

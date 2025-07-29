@@ -89,13 +89,7 @@ def create_app(args):
     ]:
         raise Exception("llm binding not supported")
 
-    if args.embedding_binding not in [
-        "lollms",
-        "ollama",
-        "openai",
-        "azure_openai",
-        "jina",
-    ]:
+    if args.embedding_binding not in ["lollms", "ollama", "openai", "azure_openai"]:
         raise Exception("embedding binding not supported")
 
     # Set default hosts if not provided
@@ -209,7 +203,6 @@ def create_app(args):
         from lightrag.llm.lollms import lollms_model_complete, lollms_embed
     if args.llm_binding == "ollama" or args.embedding_binding == "ollama":
         from lightrag.llm.ollama import ollama_model_complete, ollama_embed
-        from lightrag.llm.binding_options import OllamaLLMOptions
     if args.llm_binding == "openai" or args.embedding_binding == "openai":
         from lightrag.llm.openai import openai_complete_if_cache, openai_embed
     if args.llm_binding == "azure_openai" or args.embedding_binding == "azure_openai":
@@ -220,9 +213,6 @@ def create_app(args):
     if args.llm_binding_host == "openai-ollama" or args.embedding_binding == "ollama":
         from lightrag.llm.openai import openai_complete_if_cache
         from lightrag.llm.ollama import ollama_embed
-        from lightrag.llm.binding_options import OllamaEmbeddingOptions
-    if args.embedding_binding == "jina":
-        from lightrag.llm.jina import jina_embed
 
     async def openai_alike_model_complete(
         prompt,
@@ -273,6 +263,7 @@ def create_app(args):
 
     embedding_func = EmbeddingFunc(
         embedding_dim=args.embedding_dim,
+        max_token_size=args.max_embed_tokens,
         func=lambda texts: lollms_embed(
             texts,
             embed_model=args.embedding_model,
@@ -285,7 +276,6 @@ def create_app(args):
             embed_model=args.embedding_model,
             host=args.embedding_binding_host,
             api_key=args.embedding_binding_api_key,
-            options=OllamaEmbeddingOptions.options_dict(args),
         )
         if args.embedding_binding == "ollama"
         else azure_openai_embed(
@@ -294,13 +284,6 @@ def create_app(args):
             api_key=args.embedding_binding_api_key,
         )
         if args.embedding_binding == "azure_openai"
-        else jina_embed(
-            texts,
-            dimensions=args.embedding_dim,
-            base_url=args.embedding_binding_host,
-            api_key=args.embedding_binding_api_key,
-        )
-        if args.embedding_binding == "jina"
         else openai_embed(
             texts,
             model=args.embedding_model,
@@ -315,7 +298,7 @@ def create_app(args):
         from lightrag.rerank import custom_rerank
 
         async def server_rerank_func(
-            query: str, documents: list, top_n: int = None, **kwargs
+            query: str, documents: list, top_k: int = None, **kwargs
         ):
             """Server rerank function with configuration from environment variables"""
             return await custom_rerank(
@@ -324,7 +307,7 @@ def create_app(args):
                 model=args.rerank_model,
                 base_url=args.rerank_binding_host,
                 api_key=args.rerank_binding_api_key,
-                top_n=top_n,
+                top_k=top_k,
                 **kwargs,
             )
 
@@ -336,13 +319,6 @@ def create_app(args):
         logger.info(
             "Rerank model not configured. Set RERANK_BINDING_API_KEY and RERANK_BINDING_HOST to enable reranking."
         )
-
-    # Create ollama_server_infos from command line arguments
-    from lightrag.api.config import OllamaServerInfos
-
-    ollama_server_infos = OllamaServerInfos(
-        name=args.simulated_model_name, tag=args.simulated_model_tag
-    )
 
     # Initialize RAG
     if args.llm_binding in ["lollms", "ollama", "openai"]:
@@ -356,13 +332,13 @@ def create_app(args):
             else openai_alike_model_complete,
             llm_model_name=args.llm_model,
             llm_model_max_async=args.max_async,
-            summary_max_tokens=args.max_tokens,
+            llm_model_max_token_size=args.max_tokens,
             chunk_token_size=int(args.chunk_size),
             chunk_overlap_token_size=int(args.chunk_overlap_size),
             llm_model_kwargs={
                 "host": args.llm_binding_host,
                 "timeout": args.timeout,
-                "options": OllamaLLMOptions.options_dict(args),
+                "options": {"num_ctx": args.ollama_num_ctx},
                 "api_key": args.llm_binding_api_key,
             }
             if args.llm_binding == "lollms" or args.llm_binding == "ollama"
@@ -382,7 +358,6 @@ def create_app(args):
             max_parallel_insert=args.max_parallel_insert,
             max_graph_nodes=args.max_graph_nodes,
             addon_params={"language": args.summary_language},
-            ollama_server_infos=ollama_server_infos,
         )
     else:  # azure_openai
         rag = LightRAG(
@@ -396,7 +371,7 @@ def create_app(args):
             },
             llm_model_name=args.llm_model,
             llm_model_max_async=args.max_async,
-            summary_max_tokens=args.max_tokens,
+            llm_model_max_token_size=args.max_tokens,
             embedding_func=embedding_func,
             kv_storage=args.kv_storage,
             graph_storage=args.graph_storage,
@@ -412,7 +387,6 @@ def create_app(args):
             max_parallel_insert=args.max_parallel_insert,
             max_graph_nodes=args.max_graph_nodes,
             addon_params={"language": args.summary_language},
-            ollama_server_infos=ollama_server_infos,
         )
 
     # Add routes
@@ -546,16 +520,6 @@ def create_app(args):
                     "rerank_binding_host": args.rerank_binding_host
                     if rerank_model_func is not None
                     else None,
-                    # Environment variable status (requested configuration)
-                    "summary_language": args.summary_language,
-                    "force_llm_summary_on_merge": args.force_llm_summary_on_merge,
-                    "max_parallel_insert": args.max_parallel_insert,
-                    "cosine_threshold": args.cosine_threshold,
-                    "min_rerank_score": args.min_rerank_score,
-                    "related_chunk_number": args.related_chunk_number,
-                    "max_async": args.max_async,
-                    "embedding_func_max_async": args.embedding_func_max_async,
-                    "embedding_batch_num": args.embedding_batch_num,
                 },
                 "auth_mode": auth_mode,
                 "pipeline_busy": pipeline_status.get("busy", False),

@@ -6,6 +6,12 @@ from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdg
 from lightrag.utils import logger
 from lightrag.base import BaseGraphStorage
 from lightrag.constants import GRAPH_FIELD_SEP
+
+import pipmaster as pm
+
+if not pm.is_installed("networkx"):
+    pm.install("networkx")
+
 import networkx as nx
 from .shared_storage import (
     get_storage_lock,
